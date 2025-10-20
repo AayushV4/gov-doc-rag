@@ -1,5 +1,4 @@
 name: Deploy API
-
 on:
   push:
     branches: [ main ]
@@ -7,11 +6,9 @@ on:
       - 'services/api/**'
       - '.github/workflows/deploy-api.yml'
   workflow_dispatch:
-
 permissions:
   id-token: write
   contents: read
-
 env:
   AWS_REGION: us-east-1
   ACCOUNT_ID: "023268101038"
@@ -20,7 +17,6 @@ env:
   K8S_NAMESPACE: gov-doc-rag
   DEPLOYMENT_NAME: api
   CONTAINER_NAME: api
-
 jobs:
   build-push-deploy:
     runs-on: ubuntu-latest
@@ -32,6 +28,14 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::023268101038:role/gov-doc-rag-deploy
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Who am I? (verify AWS creds)
+        run: aws sts get-caller-identity
+
+      - name: Ensure ECR repository exists
+        run: |
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null 2>&1 || \
+          aws ecr create-repository --repository-name "$ECR_REPOSITORY" --image-scanning-configuration scanOnPush=true
 
       - name: Login to Amazon ECR
         id: ecr
@@ -50,23 +54,16 @@ jobs:
           platforms: linux/amd64
           tags: ${{ steps.tag.outputs.tag }}
 
-      - name: Who am I? (verify AWS creds)
-        run: aws sts get-caller-identity
-
-      - name: Update kubeconfig (write to temp file)
+      - name: Update kubeconfig
         run: |
           KCFG="$RUNNER_TEMP/kubeconfig"
-          aws eks update-kubeconfig \
-            --region "${{ env.AWS_REGION }}" \
-            --name "${{ env.EKS_CLUSTER }}" \
-            --alias "gha-${{ env.EKS_CLUSTER }}" \
-            --kubeconfig "$KCFG"
+          aws eks update-kubeconfig --region "${{ env.AWS_REGION }}" --name "${{ env.EKS_CLUSTER }}" --alias "gha-${{ env.EKS_CLUSTER }}" --kubeconfig "$KCFG"
           echo "KUBECONFIG=$KCFG" >> "$GITHUB_ENV"
 
       - name: Can we get a token?
         run: aws eks get-token --region "${{ env.AWS_REGION }}" --cluster-name "${{ env.EKS_CLUSTER }}" >/dev/null
 
-      - name: Check cluster reachability
+      - name: Check cluster
         run: kubectl --request-timeout=20s cluster-info
 
       - name: Rollout new image
