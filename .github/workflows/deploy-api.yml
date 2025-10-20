@@ -39,28 +39,7 @@ jobs:
 
       - name: Compute image tag
         id: tag
-        run: |
-          TS=$(date -u +%Y%m%d%H%M%S)
-          echo "tag=${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${TS}" >> $GITHUB_OUTPUT
-
-      - name: Build & push image
-        uses: docker/build-push-action@v6
-        with:
-          context: ./services
-          file: ./services/api/Dockerfile
-          push: true
-          platforms: linux/amd64
-          tags: ${{ steps.tag.outputs.tag }}
-
-      - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
-
-      - name: Rollout new image
-        env:
-          IMG: ${{ steps.tag.outputs.tag }}
-        run: |
-          kubectl -n "$K8S_NAMESPACE" set image deploy/"$DEPLOYMENT_NAME" "$CONTAINER_NAME"="$IMG"
-          kubectl -n "$K8S_NAMESPACE" rollout status deploy/"$DEPLOYMENT_NAME" --timeout=5m
+        run: echo "tag=${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:$(date -u +%Y%m%d%H%M%S)" >> $GITHUB_OUTPUT
 
       - name: Build & push image
         uses: docker/build-push-action@v6
@@ -70,3 +49,13 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: ${{ steps.tag.outputs.tag }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "${{ env.EKS_CLUSTER }}" --region "${{ env.AWS_REGION }}"
+
+      - name: Rollout new image
+        env:
+          IMG: ${{ steps.tag.outputs.tag }}
+        run: |
+          kubectl -n "${{ env.K8S_NAMESPACE }}" set image deploy/"${{ env.DEPLOYMENT_NAME }}" "${{ env.CONTAINER_NAME }}"="$IMG"
+          kubectl -n "${{ env.K8S_NAMESPACE }}" rollout status deploy/"${{ env.DEPLOYMENT_NAME }}" --timeout=5m
