@@ -61,3 +61,12 @@ jobs:
         run: |
           kubectl -n "$K8S_NAMESPACE" set image deploy/"$DEPLOYMENT_NAME" "$CONTAINER_NAME"="$IMG"
           kubectl -n "$K8S_NAMESPACE" rollout status deploy/"$DEPLOYMENT_NAME" --timeout=5m
+
+      - name: Build & push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./services/api/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.tag.outputs.tag }}
