@@ -49,3 +49,10 @@ test: init
 	else \
 		echo "No tests found; skipping."; \
 	fi
+
+.PHONY: sso eks
+sso:
+	AWS_PROFILE=gov-doc-rag aws sso login
+
+eks:
+	AWS_PROFILE=gov-doc-rag aws eks update-kubeconfig --region us-east-1 --name gov-doc-rag-cluster --profile gov-doc-rag

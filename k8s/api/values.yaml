@@ -1,0 +1,35 @@
+namespace: gov-doc-rag
+
+image:
+  repository: "023268101038.dkr.ecr.us-east-1.amazonaws.com/gov-doc-rag-api"
+  pullPolicy: IfNotPresent
+
+service:
+  port: 8000
+
+env:
+  AWS_REGION: "us-east-1"
+  # The Bedrock model you tested
+  LLM_MODEL: "anthropic.claude-3-haiku-20240307-v1:0"
+  # If your API reads Pinecone values from Secrets Manager (as your CLIs do),
+  # you don't need to set PINECONE_* env vars here.
+  # If it reads env vars directly, add them here.
+
+# IRSA role for the pod (REQUIRED)
+irsaRoleArn: "arn:aws:iam::023268101038:role/gov-doc-rag-api"
+
+ingress:
+  enabled: true
+  # set a hostname if you want, otherwise you'll use the ALB DNS directly
+  host: ""
+  path: /
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/success-codes: "200"
+    # Uncomment & set a cert ARN to enable HTTPS:
+    # alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:XXXXXXXXXXXX:certificate/...

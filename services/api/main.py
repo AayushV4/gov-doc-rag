@@ -4,7 +4,7 @@ import time
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from langdetect import detect as lang_detect, LangDetectException
@@ -268,6 +268,11 @@ def health():
     return {"ok": True, "region": AWS_REGION, "backend": BACKEND}
 
 
+@app.head("/health")
+def health_head():
+    return Response(status_code=200)
+
+
 @app.post("/ask")
 def ask(inp: AskIn):
     if BACKEND != "pinecone":
@@ -319,6 +324,15 @@ def ask(inp: AskIn):
         )
 
     return JSONResponse({"answer": answer, "citations": cites})
+
+
+@app.middleware("http")
+async def hsts_middleware(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers["Strict-Transport-Security"] = (
+        "max-age=31536000; includeSubDomains; preload"
+    )
+    return resp
 
 
 # ========== /upload (simple wrapper over Phase 2 logic) ==========
