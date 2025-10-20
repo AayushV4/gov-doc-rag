@@ -8,3 +8,6 @@ dist/
 terraform.tfstate
 terraform.tfstate.*
 crash.log
+
+# local EKS dump
+aws-auth.yaml

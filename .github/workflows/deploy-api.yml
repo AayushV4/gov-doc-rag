@@ -50,8 +50,24 @@ jobs:
           platforms: linux/amd64
           tags: ${{ steps.tag.outputs.tag }}
 
-      - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name "${{ env.EKS_CLUSTER }}" --region "${{ env.AWS_REGION }}"
+      - name: Who am I? (verify AWS creds)
+        run: aws sts get-caller-identity
+
+      - name: Update kubeconfig (write to temp file)
+        run: |
+          KCFG="$RUNNER_TEMP/kubeconfig"
+          aws eks update-kubeconfig \
+            --region "${{ env.AWS_REGION }}" \
+            --name "${{ env.EKS_CLUSTER }}" \
+            --alias "gha-${{ env.EKS_CLUSTER }}" \
+            --kubeconfig "$KCFG"
+          echo "KUBECONFIG=$KCFG" >> "$GITHUB_ENV"
+
+      - name: Can we get a token?
+        run: aws eks get-token --region "${{ env.AWS_REGION }}" --cluster-name "${{ env.EKS_CLUSTER }}" >/dev/null
+
+      - name: Check cluster reachability
+        run: kubectl --request-timeout=20s cluster-info
 
       - name: Rollout new image
         env:
