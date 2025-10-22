@@ -1,0 +1,29 @@
+name: Deploy Failure Alerts
+
+on:
+  workflow_run:
+    workflows: ["Deploy API"]
+    types: [completed]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  TOPIC_ARN: arn:aws:sns:us-east-1:023268101038:gov-doc-rag-alerts
+
+jobs:
+  publish-alert:
+    if: ${{ github.event.workflow_run.conclusion != 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::023268101038:role/gov-doc-rag-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Publish to SNS
+        run: |
+          MSG="Deploy API failed: repo=${{ github.repository }}, run_id=${{ github.event.workflow_run.id }}, status=${{ github.event.workflow_run.conclusion }}"
+          aws sns publish --topic-arn "$TOPIC_ARN" --message "$MSG" --subject "Deploy API failed"
