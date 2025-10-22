@@ -72,3 +72,21 @@ jobs:
         run: |
           kubectl -n "${{ env.K8S_NAMESPACE }}" set image deploy/"${{ env.DEPLOYMENT_NAME }}" "${{ env.CONTAINER_NAME }}"="$IMG"
           kubectl -n "${{ env.K8S_NAMESPACE }}" rollout status deploy/"${{ env.DEPLOYMENT_NAME }}" --timeout=5m
+
+      - name: Wait for pods Ready
+        run: kubectl -n "${{ env.K8S_NAMESPACE }}" wait deploy/"${{ env.DEPLOYMENT_NAME }}" --for=condition=available --timeout=3m
+
+      - name: Smoke test
+        run: |
+          for i in {1..12}; do
+            code=$(curl -fsS -o /dev/null -w "%{http_code}" https://api.fedocx.online/health || true)
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 10
+          done
+          exit 1
+
+      - name: Roll back on failure
+        if: failure()
+        run: |
+          kubectl -n "${{ env.K8S_NAMESPACE }}" rollout undo deploy/"${{ env.DEPLOYMENT_NAME }}"
+          kubectl -n "${{ env.K8S_NAMESPACE }}" rollout status deploy/"${{ env.DEPLOYMENT_NAME }}" --timeout=5m
