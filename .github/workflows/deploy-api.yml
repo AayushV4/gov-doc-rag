@@ -60,6 +60,10 @@ jobs:
           aws eks update-kubeconfig --region "${{ env.AWS_REGION }}" --name "${{ env.EKS_CLUSTER }}" --alias "gha-${{ env.EKS_CLUSTER }}" --kubeconfig "$KCFG"
           echo "KUBECONFIG=$KCFG" >> "$GITHUB_ENV"
 
+      - name: Apply base manifests
+        run: kubectl apply --server-side -f k8s/base
+
+
       - name: Can we get a token?
         run: aws eks get-token --region "${{ env.AWS_REGION }}" --cluster-name "${{ env.EKS_CLUSTER }}" >/dev/null
 
