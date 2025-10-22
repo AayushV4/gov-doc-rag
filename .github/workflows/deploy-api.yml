@@ -90,3 +90,17 @@ jobs:
         run: |
           kubectl -n "${{ env.K8S_NAMESPACE }}" rollout undo deploy/"${{ env.DEPLOYMENT_NAME }}"
           kubectl -n "${{ env.K8S_NAMESPACE }}" rollout status deploy/"${{ env.DEPLOYMENT_NAME }}" --timeout=5m
+
+      - name: Rollout status (with fallback)
+        if: always()
+        env:
+          NS: ${{ env.K8S_NAMESPACE }}
+          DEPLOY: ${{ env.DEPLOYMENT_NAME }}
+        run: |
+          set -e
+          if ! kubectl -n "$NS" rollout status deploy/"$DEPLOY" --timeout=3m; then
+            echo "Rollout failed — performing rollback"
+            kubectl -n "$NS" rollout undo deploy/"$DEPLOY"
+            kubectl -n "$NS" rollout status deploy/"$DEPLOY" --timeout=3m
+            exit 1
+          fi
