@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import cohere
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 
@@ -41,6 +42,15 @@ GUARDRAIL_SECRET = os.getenv(
 GUARDRAIL_SSM_PARAM = os.getenv(
     "BEDROCK_GUARDRAIL_PARAM", "/gov-doc-rag/BEDROCK_GUARDRAIL_ID"
 )
+
+# Reranker configuration
+ENABLE_RERANK = os.getenv("ENABLE_RERANK", "true").lower() in ("true", "1", "yes")
+RERANK_MODEL = os.getenv(
+    "RERANK_MODEL", "rerank-english-v3.0"
+)  # or rerank-multilingual-v3.0
+RERANK_TOP_N = int(os.getenv("RERANK_TOP_N", "6"))
+RETRIEVAL_K = int(os.getenv("RETRIEVAL_K", "20"))  # Retrieve more, then rerank
+COHERE_API_KEY_SECRET = os.getenv("COHERE_API_KEY_SECRET", "gov-doc-rag/COHERE_API_KEY")
 
 # ingestion toggle for raw uploads (Phase 2 logic)
 INGEST_SSE = (os.getenv("INGEST_SSE") or "").upper().strip()
@@ -202,6 +212,88 @@ def pinecone_query(
     return getattr(res, "matches", res.get("matches", []))
 
 
+# ========= Cohere Rerank =========
+_cohere_client: Optional[cohere.Client] = None
+
+
+def get_cohere_client() -> cohere.Client:
+    """Get cached Cohere client."""
+    global _cohere_client
+    if _cohere_client:
+        return _cohere_client
+
+    api_key = secret_string(COHERE_API_KEY_SECRET)
+    if not api_key:
+        raise HTTPException(500, "Missing Cohere API key in Secrets Manager")
+
+    _cohere_client = cohere.Client(api_key)
+    return _cohere_client
+
+
+def rerank_results(
+    query: str, matches: List[Dict[str, Any]], top_n: int = 6
+) -> List[Dict[str, Any]]:
+    """
+    Rerank search results using Cohere Rerank API.
+
+    Args:
+        query: The search query
+        matches: List of Pinecone matches with metadata
+        top_n: Number of top results to return after reranking
+
+    Returns:
+        Reranked list of matches (top_n results)
+    """
+    if not matches:
+        return []
+
+    client = get_cohere_client()
+
+    # Prepare documents for reranking
+    # Cohere Rerank expects a list of strings or dicts with 'text' field
+    documents = []
+    for m in matches:
+        meta = m["metadata"] if isinstance(m, dict) else m.metadata
+        text = meta.get("text", "")
+        documents.append(text)
+
+    # Call Cohere Rerank
+    try:
+        rerank_response = client.rerank(
+            model=RERANK_MODEL,
+            query=query,
+            documents=documents,
+            top_n=top_n,
+            return_documents=False,  # We already have the documents
+        )
+
+        # Reorder matches based on rerank scores
+        reranked_matches = []
+        for result in rerank_response.results:
+            original_index = result.index
+            rerank_score = result.relevance_score
+
+            # Get the original match and add rerank score
+            match = matches[original_index]
+            if isinstance(match, dict):
+                match["rerank_score"] = rerank_score
+            else:
+                # For object-style matches, create dict
+                match = {
+                    "metadata": match.metadata,
+                    "score": match.score,
+                    "rerank_score": rerank_score,
+                }
+            reranked_matches.append(match)
+
+        return reranked_matches
+
+    except Exception as e:
+        print(f"Reranking failed: {e}. Falling back to original results.")
+        # Fallback: return original top_n results
+        return matches[:top_n]
+
+
 # ========= LLM call (Claude on Bedrock) =========
 def claude_chat(messages):
     """
@@ -280,14 +372,21 @@ def ask(inp: AskIn):
             400, f"BACKEND={BACKEND} not supported here; set to pinecone"
         )
 
-    # 1) retrieve
-    matches = pinecone_query(inp.query, k=inp.k, lang_hint=inp.lang_hint)
+    # 1) retrieve - get more results if reranking is enabled
+    retrieval_k = RETRIEVAL_K if ENABLE_RERANK else inp.k
+    matches = pinecone_query(inp.query, k=retrieval_k, lang_hint=inp.lang_hint)
+
+    # 2) rerank if enabled
+    if ENABLE_RERANK and len(matches) > 0:
+        matches = rerank_results(inp.query, matches, top_n=RERANK_TOP_N)
+
+    # 3) build contexts
     contexts: List[Dict[str, Any]] = []
     for m in matches:
         meta = m["metadata"] if isinstance(m, dict) else m.metadata
         contexts.append({"metadata": meta})
 
-    # 2) prompt
+    # 4) prompt
     sys_prompt = SYSTEM_PROMPT
     user_prompt = build_user_prompt(inp.query, contexts)
     messages = [
@@ -295,10 +394,10 @@ def ask(inp: AskIn):
         {"role": "user", "content": [{"type": "text", "text": user_prompt}]},
     ]
 
-    # 3) LLM
+    # 5) LLM
     answer = claude_chat(messages)
 
-    # 4) If user is FR and model answered EN, translate back (heuristic)
+    # 6) If user is FR and model answered EN, translate back (heuristic)
     q_lang = inp.lang_hint or detect_lang(inp.query)
     if q_lang == "fr":
         try:
@@ -310,7 +409,7 @@ def ask(inp: AskIn):
                 Text=answer, SourceLanguageCode="en", TargetLanguageCode="fr"
             )["TranslatedText"]
 
-    # 5) citations
+    # 7) citations
     cites = []
     for m in matches:
         meta = m["metadata"] if isinstance(m, dict) else m.metadata
@@ -319,7 +418,8 @@ def ask(inp: AskIn):
                 "doc_id": meta.get("doc_id"),
                 "page": meta.get("page"),
                 "snippet": meta.get("text"),
-                "bbox": None,  # page bbox would require deeper line mapping; included for schema stability
+                "bbox": None,
+                "rerank_score": m.get("rerank_score") if isinstance(m, dict) else None,
             }
         )
 
