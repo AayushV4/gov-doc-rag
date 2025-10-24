@@ -1,0 +1,18 @@
+# Evaluation Framework Dependencies
+# Install with: pip install -r evals/requirements.txt
+
+# RAGAS - RAG evaluation framework
+ragas>=0.1.0
+datasets>=2.14.0
+
+# API interaction
+requests>=2.31.0
+
+# AWS Bedrock (for question generation)
+boto3>=1.34.0
+
+# Pinecone (for sampling documents)
+pinecone-client>=3.0.0
+
+# Data processing
+pandas>=2.0.0
