@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
+from langchain_aws import ChatBedrock, BedrockEmbeddings
+
 import requests
 from datasets import Dataset
 from ragas import evaluate
@@ -155,6 +157,67 @@ def calculate_citation_metrics(
     }
 
 
+def analyze_reranker_metrics(api_responses: List[Dict]) -> Dict[str, Any]:
+    """
+    Analyze reranker performance if rerank scores are present.
+
+    Returns:
+    - has_rerank_scores: Whether responses include rerank scores
+    - avg_rerank_score: Average rerank score across all citations
+    - min_rerank_score: Minimum rerank score
+    - max_rerank_score: Maximum rerank score
+    - rerank_score_distribution: Distribution by quartile
+    """
+    rerank_scores = []
+    has_scores = False
+
+    for response in api_responses:
+        for citation in response.get("citations", []):
+            score = citation.get("rerank_score")
+            if score is not None:
+                has_scores = True
+                rerank_scores.append(score)
+
+    if not has_scores or not rerank_scores:
+        return {
+            "has_rerank_scores": False,
+            "message": "No rerank scores found in responses",
+        }
+
+    sorted_scores = sorted(rerank_scores)
+    n = len(sorted_scores)
+
+    return {
+        "has_rerank_scores": True,
+        "num_scored_citations": len(rerank_scores),
+        "avg_rerank_score": sum(rerank_scores) / n,
+        "min_rerank_score": min(rerank_scores),
+        "max_rerank_score": max(rerank_scores),
+        "median_rerank_score": sorted_scores[n // 2],
+        "q1_rerank_score": sorted_scores[n // 4],
+        "q3_rerank_score": sorted_scores[3 * n // 4],
+    }
+
+
+def setup_bedrock_llm(region: str = "us-east-1"):
+    """Configure Bedrock LLM for RAGAS evaluation."""
+    llm = ChatBedrock(
+        model_id="anthropic.claude-3-sonnet-20240229-v1:0",
+        region_name=region,
+        model_kwargs={
+            "temperature": 0.0,
+            "max_tokens": 2048,
+        },
+    )
+
+    embeddings = BedrockEmbeddings(
+        model_id="cohere.embed-english-v3",
+        region_name=region,
+    )
+
+    return llm, embeddings
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run RAGAS evaluation on golden set")
     parser.add_argument(
@@ -202,6 +265,9 @@ def main():
     print("\nPreparing RAGAS dataset...")
     dataset = prepare_ragas_dataset(golden_set, api_responses)
 
+    print("\nSetting up AWS Bedrock for evaluation...")
+    llm, embeddings = setup_bedrock_llm(region="us-east-1")
+
     # Run RAGAS evaluation
     print("\nRunning RAGAS evaluation...")
     print(
@@ -219,16 +285,23 @@ def main():
             answer_similarity,
             answer_correctness,
         ],
+        llm=llm,
+        embeddings=embeddings,
     )
 
     # Calculate custom citation metrics
     print("\nCalculating citation metrics...")
     citation_metrics = calculate_citation_metrics(golden_set, api_responses)
 
+    # Analyze reranker performance
+    print("\nAnalyzing reranker metrics...")
+    reranker_metrics = analyze_reranker_metrics(api_responses)
+
     # Combine results
     results = {
         "ragas_metrics": ragas_results,
         "citation_metrics": citation_metrics,
+        "reranker_metrics": reranker_metrics,
         "num_examples": len(golden_set),
         "api_url": args.api_url,
         "k": args.k,
@@ -246,6 +319,14 @@ def main():
     print("\nCitation Metrics:")
     for metric, value in citation_metrics.items():
         print(f"  {metric:25s}: {value:.4f}")
+
+    print("\nReranker Metrics:")
+    if reranker_metrics.get("has_rerank_scores"):
+        for metric, value in reranker_metrics.items():
+            if metric != "has_rerank_scores" and isinstance(value, (int, float)):
+                print(f"  {metric:25s}: {value:.4f}")
+    else:
+        print(f"  {reranker_metrics.get('message', 'No reranker data')}")
 
     # Save results
     output_path = Path(args.output)

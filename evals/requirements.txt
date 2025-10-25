@@ -16,3 +16,5 @@ pinecone-client>=3.0.0
 
 # Data processing
 pandas>=2.0.0
+
+langchain-aws>=0.1.0
