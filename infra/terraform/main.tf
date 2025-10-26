@@ -216,3 +216,4 @@ output "log_groups" {
     dataplane  = module.logging.dataplane_log_group_name
   }
 }
+output "fluentbit_role_arn" { value = module.iam.fluentbit_role_arn }

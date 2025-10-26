@@ -17,7 +17,8 @@ data "aws_iam_policy_document" "irsa_trust" {
         "system:serviceaccount:${local.sa_ns}:api",
         "system:serviceaccount:${local.sa_ns}:indexer",
         "system:serviceaccount:${local.sa_ns}:ingestor",
-        "system:serviceaccount:kube-system:${var.project}-alb-controller"
+        "system:serviceaccount:kube-system:${var.project}-alb-controller",
+        "system:serviceaccount:amazon-cloudwatch:fluentbit"
       ]
     }
   }
@@ -192,6 +193,21 @@ data "aws_iam_policy_document" "alb" {
   }
 }
 
+# ---------- FluentBit CloudWatch Logs policy ----------
+data "aws_iam_policy_document" "fluentbit" {
+  statement {
+    sid = "CloudWatchLogsPut"
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+      "logs:DescribeLogGroups",
+      "logs:DescribeLogStreams"
+    ]
+    resources = ["*"]
+  }
+}
+
 resource "aws_iam_role" "alb_controller" {
   name               = "${var.project}-alb-controller"
   assume_role_policy = data.aws_iam_policy_document.irsa_trust.json
@@ -199,6 +215,17 @@ resource "aws_iam_role" "alb_controller" {
 resource "aws_iam_role_policy" "alb_controller" {
   role   = aws_iam_role.alb_controller.id
   policy = data.aws_iam_policy_document.alb.json
+}
+
+# ---------- FluentBit role ----------
+resource "aws_iam_role" "fluentbit" {
+  name               = "${var.project}-fluentbit"
+  assume_role_policy = data.aws_iam_policy_document.irsa_trust.json
+}
+
+resource "aws_iam_role_policy" "fluentbit" {
+  role   = aws_iam_role.fluentbit.id
+  policy = data.aws_iam_policy_document.fluentbit.json
 }
 
 # ---------- Optional: GitHub Actions OIDC role (created if enabled) ----------
