@@ -4,12 +4,15 @@
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
 import uuid
 from typing import Any, Dict, List, Optional
 from collections import defaultdict
+from pythonjsonlogger import jsonlogger
+
 import boto3
 from botocore.config import Config
 from langdetect import detect as lang_detect, LangDetectException
@@ -20,6 +23,32 @@ PROCESSED_BUCKET = os.getenv("PROCESSED_BUCKET", "gov-doc-processed")
 TX_FEATURES = ["TABLES", "FORMS"]
 POLL_SECONDS = 4
 POLL_MAX_MINUTES = 30
+
+
+# ========= Logging Configuration =========
+def setup_logging():
+    """Configure structured JSON logging for CloudWatch."""
+    logger = logging.getLogger()
+
+    # Only configure if not already configured
+    if logger.handlers:
+        return
+
+    logger.setLevel(logging.INFO)
+
+    # JSON formatter for CloudWatch
+    log_handler = logging.StreamHandler(sys.stdout)
+    formatter = jsonlogger.JsonFormatter(
+        fmt="%(asctime)s %(name)s %(levelname)s %(message)s",
+        rename_fields={"asctime": "timestamp", "levelname": "level", "name": "logger"},
+    )
+    log_handler.setFormatter(formatter)
+    logger.addHandler(log_handler)
+
+
+# Initialize logging
+setup_logging()
+logger = logging.getLogger(__name__)
 
 
 def _s3() -> Any:
@@ -47,12 +76,12 @@ def upload_file_to_raw(local_path: str, doc_id: str) -> str:
 
     if sse_mode == "AES256":
         extra_args = {"ServerSideEncryption": "AES256"}
-        print("   (uploading with SSE-S3/AES256 for Textract compatibility)")
+        logger.info("Uploading with SSE-S3/AES256 for Textract compatibility")
     elif sse_mode in ("KMS", "AWS:KMS"):
         kms_key = os.getenv("INGEST_KMS_KEY_ID")
         if kms_key:
             extra_args = {"ServerSideEncryption": "aws:kms", "SSEKMSKeyId": kms_key}
-            print(f"   (uploading with SSE-KMS key {kms_key})")
+            logger.info("Uploading with SSE-KMS", extra={"kms_key_id": kms_key})
 
     if extra_args:
         s3.upload_file(local_path, RAW_BUCKET, key, ExtraArgs=extra_args)
@@ -163,7 +192,8 @@ def _page_lang(text: str) -> str:
     try:
         code = lang_detect(text[:4000])
         return "fr" if code.startswith("fr") else "en"
-    except LangDetectException:
+    except LangDetectException as e:
+        logger.debug(f"Language detection failed for page, defaulting to 'en': {e}")
         return "en"
 
 
@@ -219,7 +249,7 @@ def write_outputs(doc_id, normalized):
 
 def cmd_upload(args):
     if not os.path.isfile(args.file):
-        print(f"File not found: {args.file}", file=sys.stderr)
+        logger.error(f"File not found: {args.file}", extra={"file_path": args.file})
         return 2
 
     doc_id = args.doc_id or str(uuid.uuid4())
@@ -229,35 +259,65 @@ def cmd_upload(args):
         "date": args.date or "",
     }
 
-    print(f"→ Uploading to s3://{RAW_BUCKET}/{doc_id}/ ...")
+    logger.info(
+        "Starting document upload",
+        extra={
+            "doc_id": doc_id,
+            "bucket": RAW_BUCKET,
+            "file": os.path.basename(args.file),
+        },
+    )
     s3_key = upload_file_to_raw(args.file, doc_id)
 
     # sanity check the object exists and encryption mode
     try:
         obj_head = _s3().head_object(Bucket=RAW_BUCKET, Key=s3_key)
         enc = obj_head.get("ServerSideEncryption")
-        print(f"   (s3 object ok; SSE={enc})")
+        logger.info(
+            "S3 upload verified",
+            extra={"doc_id": doc_id, "s3_key": s3_key, "encryption": enc},
+        )
     except Exception as e:
-        print(f"!! head_object failed: {e}")
+        logger.error(
+            f"S3 head_object failed: {e}",
+            extra={"doc_id": doc_id, "s3_key": s3_key, "error": str(e)},
+        )
         raise
 
-    print("→ Starting Textract analysis ...")
+    logger.info(
+        "Starting Textract analysis", extra={"doc_id": doc_id, "s3_key": s3_key}
+    )
     job_id = start_textract(s3_key)
-    print(f"   JobId: {job_id}")
+    logger.info("Textract job started", extra={"doc_id": doc_id, "job_id": job_id})
 
-    print("→ Polling Textract... (large PDFs can take a while)")
+    logger.info(
+        "Polling Textract job (may take a while for large PDFs)",
+        extra={"job_id": job_id},
+    )
     pages = poll_textract(job_id)
-    print(f"   Chunks: {len(pages)}")
+    logger.info(
+        "Textract job completed",
+        extra={"job_id": job_id, "doc_id": doc_id, "response_chunks": len(pages)},
+    )
 
-    print("→ Normalizing...")
+    logger.info("Normalizing Textract results", extra={"doc_id": doc_id})
     normalized = normalize(pages, doc_id, s3_key, doc_meta)
 
-    print("→ Writing outputs...")
+    logger.info(
+        "Writing normalized outputs to S3",
+        extra={"doc_id": doc_id, "num_pages": len(normalized.get("pages", []))},
+    )
     write_outputs(doc_id, normalized)
 
-    print(f"✅ Done. doc_id={doc_id}")
-    print(f"   raw:       s3://{RAW_BUCKET}/{s3_key}")
-    print(f"   processed: s3://{PROCESSED_BUCKET}/{doc_id}/normalized.json")
+    logger.info(
+        "Document ingestion completed successfully",
+        extra={
+            "doc_id": doc_id,
+            "raw_s3": f"s3://{RAW_BUCKET}/{s3_key}",
+            "processed_s3": f"s3://{PROCESSED_BUCKET}/{doc_id}/normalized.json",
+            "num_pages": len(normalized.get("pages", [])),
+        },
+    )
     return 0
 
 

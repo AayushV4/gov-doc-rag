@@ -1,10 +1,12 @@
 import argparse
 import json
+import logging
 import os
 import re
 import sys
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+from pythonjsonlogger import jsonlogger
 
 import boto3
 import numpy as np
@@ -36,6 +38,32 @@ PINECONE_ENV_SECRET = os.getenv(
     "PINECONE_ENV_SECRET", "gov-doc-rag/PINECONE_ENVIRONMENT"
 )
 PINECONE_INDEX_SECRET = os.getenv("PINECONE_INDEX_SECRET", "gov-doc-rag/PINECONE_INDEX")
+
+
+# ========= Logging Configuration =========
+def setup_logging():
+    """Configure structured JSON logging for CloudWatch."""
+    logger = logging.getLogger()
+
+    # Only configure if not already configured
+    if logger.handlers:
+        return
+
+    logger.setLevel(logging.INFO)
+
+    # JSON formatter for CloudWatch
+    log_handler = logging.StreamHandler(sys.stdout)
+    formatter = jsonlogger.JsonFormatter(
+        fmt="%(asctime)s %(name)s %(levelname)s %(message)s",
+        rename_fields={"asctime": "timestamp", "levelname": "level", "name": "logger"},
+    )
+    log_handler.setFormatter(formatter)
+    logger.addHandler(log_handler)
+
+
+# Initialize logging
+setup_logging()
+logger = logging.getLogger(__name__)
 
 
 # ---------- AWS Clients ----------
@@ -87,7 +115,8 @@ def _detect_lang(text: str) -> str:
     try:
         code = lang_detect(text[:4000])
         return "fr" if code.startswith("fr") else "en"
-    except LangDetectException:
+    except LangDetectException as e:
+        logger.debug(f"Language detection failed, defaulting to 'en': {e}")
         return "en"
 
 
@@ -328,22 +357,31 @@ def pinecone_query(
 # ---------- CLI ----------
 def cmd_index(args: argparse.Namespace) -> int:
     s3_uri = args.s3_uri
-    print(f"→ Loading normalized JSON from {s3_uri}")
+    logger.info("Loading normalized JSON from S3", extra={"s3_uri": s3_uri})
     normalized = s3_read_json(s3_uri)
+    doc_id = normalized.get("doc_id", "unknown")
 
-    print("→ Building chunks...")
+    logger.info("Building chunks from document", extra={"doc_id": doc_id})
     chunks = build_chunks(normalized)
-    print(f"   Built {len(chunks)} chunks")
+    logger.info(
+        "Chunks built successfully", extra={"doc_id": doc_id, "num_chunks": len(chunks)}
+    )
 
     if BACKEND != "pinecone":
-        print(
-            f"BACKEND={BACKEND} not implemented in this CLI yet. Set BACKEND=pinecone."
+        logger.error(
+            f"Unsupported backend: {BACKEND}. Only 'pinecone' is supported.",
+            extra={"backend": BACKEND},
         )
         return 2
 
-    print("→ Connecting to Pinecone and upserting...")
+    logger.info(
+        "Connecting to Pinecone and upserting vectors",
+        extra={"doc_id": doc_id, "num_chunks": len(chunks)},
+    )
     count = pinecone_upsert(chunks)
-    print(f"✅ Upserted {count} vectors")
+    logger.info(
+        "Vectors upserted successfully", extra={"doc_id": doc_id, "num_vectors": count}
+    )
     return 0
 
 
@@ -352,21 +390,32 @@ def cmd_query(args: argparse.Namespace) -> int:
     k = args.k
     lang = args.lang
     if BACKEND != "pinecone":
-        print(
-            f"BACKEND={BACKEND} not implemented in this CLI yet. Set BACKEND=pinecone."
+        logger.error(
+            f"Unsupported backend: {BACKEND}. Only 'pinecone' is supported.",
+            extra={"backend": BACKEND},
         )
         return 2
 
-    print(f"→ Query: {q} (k={k}, lang={lang or 'auto'})")
+    logger.info("Executing query", extra={"query": q, "k": k, "lang": lang or "auto"})
     matches = pinecone_query(q, k=k, lang_hint=lang)
-    for m in matches:
+    logger.info("Query completed", extra={"query": q, "num_matches": len(matches)})
+
+    # Log individual matches
+    for i, m in enumerate(matches):
         meta = m["metadata"] if isinstance(m, dict) else m.metadata
         score = m["score"] if isinstance(m, dict) else m.score
-        print(
-            f"- score={score:.4f}  doc_id={meta.get('doc_id')} page={meta.get('page')} lang={meta.get('lang')}"
-        )
         snippet = (meta.get("text") or "").replace("\n", " ")
-        print(f"  snippet: {snippet[:180]}{'...' if len(snippet)>180 else ''}")
+        logger.info(
+            f"Match {i+1}",
+            extra={
+                "rank": i + 1,
+                "score": score,
+                "doc_id": meta.get("doc_id"),
+                "page": meta.get("page"),
+                "lang": meta.get("lang"),
+                "snippet": snippet[:180],
+            },
+        )
     return 0
 
 

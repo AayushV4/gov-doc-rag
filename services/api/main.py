@@ -1,4 +1,7 @@
 import os
+import logging
+import sys
+from pythonjsonlogger import jsonlogger
 import json
 import time
 import cohere
@@ -16,6 +19,32 @@ from tenacity import retry, wait_exponential, stop_after_attempt
 
 # local modules
 from services.api.prompt import SYSTEM_PROMPT, build_user_prompt
+
+
+# ========= Logging Configuration =========
+def setup_logging():
+    """Configure structured JSON logging for CloudWatch."""
+    logger = logging.getLogger()
+
+    # Only configure if not already configured
+    if logger.handlers:
+        return
+
+    logger.setLevel(logging.INFO)
+
+    # JSON formatter for CloudWatch
+    log_handler = logging.StreamHandler(sys.stdout)
+    formatter = jsonlogger.JsonFormatter(
+        fmt="%(asctime)s %(name)s %(levelname)s %(message)s",
+        rename_fields={"asctime": "timestamp", "levelname": "level", "name": "logger"},
+    )
+    log_handler.setFormatter(formatter)
+    logger.addHandler(log_handler)
+
+
+# Initialize logging
+setup_logging()
+logger = logging.getLogger(__name__)
 
 # ========= Env & Defaults =========
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
@@ -87,7 +116,8 @@ def detect_lang(text: str) -> str:
     try:
         code = lang_detect(text[:4000])
         return "fr" if code.startswith("fr") else "en"
-    except LangDetectException:
+    except LangDetectException as e:
+        logger.debug(f"Language detection failed, defaulting to 'en': {e}")
         return "en"
 
 
@@ -96,7 +126,10 @@ def secret_string(name: str) -> Optional[str]:
         resp = sm().get_secret_value(SecretId=name)
         if resp.get("SecretString"):
             return resp["SecretString"]
-    except Exception:
+    except Exception as e:
+        logger.error(
+            f"Failed to retrieve secret '{name}': {e}", extra={"secret_name": name}
+        )
         return None
     return None
 
@@ -105,7 +138,11 @@ def ssm_param(name: str) -> Optional[str]:
     try:
         resp = ssm().get_parameter(Name=name)
         return resp["Parameter"]["Value"]
-    except Exception:
+    except Exception as e:
+        logger.error(
+            f"Failed to retrieve SSM parameter '{name}': {e}",
+            extra={"parameter_name": name},
+        )
         return None
 
 
@@ -289,7 +326,10 @@ def rerank_results(
         return reranked_matches
 
     except Exception as e:
-        print(f"Reranking failed: {e}. Falling back to original results.")
+        logger.warning(
+            f"Reranking failed: {e}. Falling back to original results.",
+            extra={"error": str(e), "num_matches": len(matches)},
+        )
         # Fallback: return original top_n results
         return matches[:top_n]
 
@@ -367,6 +407,12 @@ def health_head():
 
 @app.post("/ask")
 def ask(inp: AskIn):
+    start_time = time.time()
+    logger.info(
+        "Received /ask request",
+        extra={"query_length": len(inp.query), "k": inp.k, "lang_hint": inp.lang_hint},
+    )
+
     if BACKEND != "pinecone":
         raise HTTPException(
             400, f"BACKEND={BACKEND} not supported here; set to pinecone"
@@ -402,7 +448,8 @@ def ask(inp: AskIn):
     if q_lang == "fr":
         try:
             a_lang = detect_lang(answer)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to detect answer language, defaulting to 'en': {e}")
             a_lang = "en"
         if a_lang != "fr":
             answer = translate().translate_text(
@@ -422,6 +469,16 @@ def ask(inp: AskIn):
                 "rerank_score": m.get("rerank_score") if isinstance(m, dict) else None,
             }
         )
+
+    duration = time.time() - start_time
+    logger.info(
+        "Completed /ask request",
+        extra={
+            "duration_seconds": duration,
+            "num_citations": len(cites),
+            "answer_length": len(answer),
+        },
+    )
 
     return JSONResponse({"answer": answer, "citations": cites})
 
@@ -444,6 +501,12 @@ async def upload(
     dept: Optional[str] = Form(None),
     date: Optional[str] = Form(None),
 ):
+    start_time = time.time()
+    logger.info(
+        "Received /upload request",
+        extra={"filename": file.filename, "title": title, "dept": dept},
+    )
+
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF is supported")
 
@@ -483,8 +546,18 @@ async def upload(
     # cleanup
     try:
         os.remove(tmp_path)
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            f"Failed to cleanup temp file {tmp_path}: {e}",
+            extra={"temp_path": tmp_path},
+        )
         pass
+
+    duration = time.time() - start_time
+    logger.info(
+        "Completed /upload request",
+        extra={"doc_id": doc_id, "duration_seconds": duration},
+    )
 
     return {
         "doc_id": doc_id,
