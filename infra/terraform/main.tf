@@ -40,6 +40,20 @@ module "kms" {
   source = "./modules/kms"
 
   project = var.project
+  region  = var.region
+}
+
+# ---------- CloudWatch Logging ----------
+module "logging" {
+  source = "./modules/logging"
+
+  project             = var.project
+  cluster_name        = module.eks.cluster_name
+  log_retention_days  = var.log_retention_days
+  logs_kms_key_arn    = module.kms.logs_key_arn
+  enable_log_insights = true
+
+  depends_on = [module.eks]
 }
 
 # ---------- S3 ----------
@@ -85,7 +99,9 @@ module "vpc_endpoints" {
 
 # ---------- IAM (IRSA roles for services + ALB controller) ----------
 module "iam" {
-  source = "./modules/iam"
+  source       = "./modules/iam"
+  region       = var.region
+  cluster_name = module.eks.cluster_name
 
   project                   = var.project
   cluster_oidc_provider_arn = module.eks.oidc_provider_arn
@@ -191,3 +207,12 @@ output "ecr_repos" { value = module.ecr.repo_urls }
 output "buckets" { value = module.s3.bucket_names }
 output "oidc_provider_arn" { value = module.eks.oidc_provider_arn }
 output "alb_controller_sa" { value = module.alb_ingress.service_account_name }
+output "log_groups" {
+  value = {
+    api        = module.logging.api_log_group_name
+    ingestor   = module.logging.ingestor_log_group_name
+    indexer    = module.logging.indexer_log_group_name
+    containers = module.logging.containers_log_group_name
+    dataplane  = module.logging.dataplane_log_group_name
+  }
+}

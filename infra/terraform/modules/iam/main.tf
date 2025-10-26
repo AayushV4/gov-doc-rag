@@ -40,6 +40,20 @@ data "aws_iam_policy_document" "ingestor" {
     actions   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"]
     resources = [var.s3_kms_key_arn]
   }
+
+  statement {
+    sid = "CloudWatchLogs"
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+      "logs:DescribeLogStreams"
+    ]
+    resources = [
+      "arn:aws:logs:${var.region}:*:log-group:/aws/eks/${var.cluster_name}/application/ingestor",
+      "arn:aws:logs:${var.region}:*:log-group:/aws/eks/${var.cluster_name}/application/ingestor:*"
+    ]
+  }
 }
 
 data "aws_iam_policy_document" "indexer" {
@@ -60,6 +74,19 @@ data "aws_iam_policy_document" "indexer" {
       values   = [var.project]
     }
   }
+  statement {
+    sid = "CloudWatchLogs"
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+      "logs:DescribeLogStreams"
+    ]
+    resources = [
+      "arn:aws:logs:${var.region}:*:log-group:/aws/eks/${var.cluster_name}/application/indexer",
+      "arn:aws:logs:${var.region}:*:log-group:/aws/eks/${var.cluster_name}/application/indexer:*"
+    ]
+  }
 }
 
 data "aws_iam_policy_document" "api" {
@@ -77,6 +104,28 @@ data "aws_iam_policy_document" "api" {
       var.processed_bucket_arn, "${var.processed_bucket_arn}/*",
       var.index_bucket_arn, "${var.index_bucket_arn}/*"
     ]
+  }
+  statement {
+    sid = "CloudWatchLogs"
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+      "logs:DescribeLogStreams"
+    ]
+    resources = [
+      "arn:aws:logs:${var.region}:*:log-group:/aws/eks/${var.cluster_name}/application/api",
+      "arn:aws:logs:${var.region}:*:log-group:/aws/eks/${var.cluster_name}/application/api:*"
+    ]
+  }
+  statement {
+    actions   = ["secretsmanager:GetSecretValue", "kms:Decrypt"]
+    resources = ["*"]
+    condition {
+      test     = "StringLike"
+      variable = "secretsmanager:ResourceTag/project"
+      values   = [var.project]
+    }
   }
 }
 

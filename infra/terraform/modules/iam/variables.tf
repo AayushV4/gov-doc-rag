@@ -14,3 +14,6 @@ variable "secrets_prefix" { type = string }
 variable "create_github_oidc" { type = bool }
 variable "github_org" { type = string }
 variable "github_repo" { type = string }
+
+variable "region" { type = string }
+variable "cluster_name" { type = string }
