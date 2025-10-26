@@ -192,16 +192,28 @@ def build_chunks(normalized: Dict[str, Any]) -> List[Chunk]:
 # ---------- Embeddings via Bedrock ----------
 def _cohere_embed(texts: List[str], mode: str) -> List[List[float]]:
     # mode: "search_document" or "search_query"
-    body = json.dumps({"texts": texts, "input_type": mode})
-    resp = _bedrock().invoke_model(modelId=EMBEDDING_MODEL, body=body)
-    payload = json.loads(resp["body"].read())
-    # bedrock cohere returns {"embeddings":[ [..], [..] ]}
-    if "embeddings" in payload:
-        return payload["embeddings"]
-    # fallback if wrapped
-    if "data" in payload and payload["data"] and "embedding" in payload["data"][0]:
-        return [d["embedding"] for d in payload["data"]]
-    raise RuntimeError("Unexpected Cohere embedding response")
+    # Cohere has a max batch size of 128
+    MAX_BATCH = 96  # Use 96 to be safe
+    all_embeddings = []
+
+    for i in range(0, len(texts), MAX_BATCH):
+        batch = texts[i : i + MAX_BATCH]
+        body = json.dumps({"texts": batch, "input_type": mode})
+        resp = _bedrock().invoke_model(modelId=EMBEDDING_MODEL, body=body)
+        payload = json.loads(resp["body"].read())
+
+        # bedrock cohere returns {"embeddings":[ [..], [..] ]}
+        if "embeddings" in payload:
+            all_embeddings.extend(payload["embeddings"])
+        # fallback if wrapped
+        elif (
+            "data" in payload and payload["data"] and "embedding" in payload["data"][0]
+        ):
+            all_embeddings.extend([d["embedding"] for d in payload["data"]])
+        else:
+            raise RuntimeError("Unexpected Cohere embedding response")
+
+    return all_embeddings
 
 
 def _titan_embed(texts: List[str]) -> List[List[float]]:
