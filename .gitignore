@@ -14,3 +14,4 @@ aws-auth.yaml
 
 # local EKS dump
 aws-auth.yaml
+.DS_Store
