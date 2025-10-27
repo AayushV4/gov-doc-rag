@@ -1,13 +1,12 @@
 import os
-import logging
-import sys
-from pythonjsonlogger import jsonlogger
 import json
 import time
-import cohere
+import logging
+import sys
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 
+from pythonjsonlogger import jsonlogger
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -21,30 +20,39 @@ from tenacity import retry, wait_exponential, stop_after_attempt
 from services.api.prompt import SYSTEM_PROMPT, build_user_prompt
 
 
-# ========= Logging Configuration =========
+# ========= Structured Logging Setup =========
 def setup_logging():
     """Configure structured JSON logging for CloudWatch."""
-    logger = logging.getLogger()
-
-    # Only configure if not already configured
-    if logger.handlers:
-        return
-
-    logger.setLevel(logging.INFO)
-
-    # JSON formatter for CloudWatch
-    log_handler = logging.StreamHandler(sys.stdout)
+    # Create JSON formatter
     formatter = jsonlogger.JsonFormatter(
         fmt="%(asctime)s %(name)s %(levelname)s %(message)s",
         rename_fields={"asctime": "timestamp", "levelname": "level", "name": "logger"},
     )
-    log_handler.setFormatter(formatter)
-    logger.addHandler(log_handler)
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.handlers.clear()
+
+    root_handler = logging.StreamHandler(sys.stdout)
+    root_handler.setFormatter(formatter)
+    root_logger.addHandler(root_handler)
+
+    # Configure uvicorn loggers specifically
+    for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
+        uvicorn_logger = logging.getLogger(logger_name)
+        uvicorn_logger.handlers.clear()
+        uvicorn_logger.propagate = False
+
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(formatter)
+        uvicorn_logger.addHandler(handler)
+        uvicorn_logger.setLevel(logging.INFO)
 
 
-# Initialize logging
 setup_logging()
 logger = logging.getLogger(__name__)
+
 
 # ========= Env & Defaults =========
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
@@ -71,15 +79,6 @@ GUARDRAIL_SECRET = os.getenv(
 GUARDRAIL_SSM_PARAM = os.getenv(
     "BEDROCK_GUARDRAIL_PARAM", "/gov-doc-rag/BEDROCK_GUARDRAIL_ID"
 )
-
-# Reranker configuration
-ENABLE_RERANK = os.getenv("ENABLE_RERANK", "true").lower() in ("true", "1", "yes")
-RERANK_MODEL = os.getenv(
-    "RERANK_MODEL", "rerank-english-v3.0"
-)  # or rerank-multilingual-v3.0
-RERANK_TOP_N = int(os.getenv("RERANK_TOP_N", "6"))
-RETRIEVAL_K = int(os.getenv("RETRIEVAL_K", "20"))  # Retrieve more, then rerank
-COHERE_API_KEY_SECRET = os.getenv("COHERE_API_KEY_SECRET", "gov-doc-rag/COHERE_API_KEY")
 
 # ingestion toggle for raw uploads (Phase 2 logic)
 INGEST_SSE = (os.getenv("INGEST_SSE") or "").upper().strip()
@@ -116,8 +115,7 @@ def detect_lang(text: str) -> str:
     try:
         code = lang_detect(text[:4000])
         return "fr" if code.startswith("fr") else "en"
-    except LangDetectException as e:
-        logger.debug(f"Language detection failed, defaulting to 'en': {e}")
+    except LangDetectException:
         return "en"
 
 
@@ -127,9 +125,7 @@ def secret_string(name: str) -> Optional[str]:
         if resp.get("SecretString"):
             return resp["SecretString"]
     except Exception as e:
-        logger.error(
-            f"Failed to retrieve secret '{name}': {e}", extra={"secret_name": name}
-        )
+        logger.warning("Failed to get secret", extra={"secret": name, "error": str(e)})
         return None
     return None
 
@@ -139,9 +135,8 @@ def ssm_param(name: str) -> Optional[str]:
         resp = ssm().get_parameter(Name=name)
         return resp["Parameter"]["Value"]
     except Exception as e:
-        logger.error(
-            f"Failed to retrieve SSM parameter '{name}': {e}",
-            extra={"parameter_name": name},
+        logger.warning(
+            "Failed to get SSM parameter", extra={"param": name, "error": str(e)}
         )
         return None
 
@@ -153,7 +148,7 @@ def guardrail_cfg() -> Optional[Dict[str, Any]]:
         return {
             "guardrailIdentifier": gid,
             "guardrailVersion": "DRAFT",
-        }  # or "1" if you’ve published
+        }  # or "1" if you've published
     return None
 
 
@@ -232,6 +227,7 @@ def pinecone_connect() -> PineconeIndex:
     # assume index created by indexer; if not, fail loudly (keeps API simple)
     idx = pc.Index(index_name)
     _pinecone_cached = PineconeIndex(index=idx)
+    logger.info("Connected to Pinecone", extra={"index": index_name})
     return _pinecone_cached
 
 
@@ -247,91 +243,6 @@ def pinecone_query(
         include_metadata=True,
     )
     return getattr(res, "matches", res.get("matches", []))
-
-
-# ========= Cohere Rerank =========
-_cohere_client: Optional[cohere.Client] = None
-
-
-def get_cohere_client() -> cohere.Client:
-    """Get cached Cohere client."""
-    global _cohere_client
-    if _cohere_client:
-        return _cohere_client
-
-    api_key = secret_string(COHERE_API_KEY_SECRET)
-    if not api_key:
-        raise HTTPException(500, "Missing Cohere API key in Secrets Manager")
-
-    _cohere_client = cohere.Client(api_key)
-    return _cohere_client
-
-
-def rerank_results(
-    query: str, matches: List[Dict[str, Any]], top_n: int = 6
-) -> List[Dict[str, Any]]:
-    """
-    Rerank search results using Cohere Rerank API.
-
-    Args:
-        query: The search query
-        matches: List of Pinecone matches with metadata
-        top_n: Number of top results to return after reranking
-
-    Returns:
-        Reranked list of matches (top_n results)
-    """
-    if not matches:
-        return []
-
-    client = get_cohere_client()
-
-    # Prepare documents for reranking
-    # Cohere Rerank expects a list of strings or dicts with 'text' field
-    documents = []
-    for m in matches:
-        meta = m["metadata"] if isinstance(m, dict) else m.metadata
-        text = meta.get("text", "")
-        documents.append(text)
-
-    # Call Cohere Rerank
-    try:
-        rerank_response = client.rerank(
-            model=RERANK_MODEL,
-            query=query,
-            documents=documents,
-            top_n=top_n,
-            return_documents=False,  # We already have the documents
-        )
-
-        # Reorder matches based on rerank scores
-        reranked_matches = []
-        for result in rerank_response.results:
-            original_index = result.index
-            rerank_score = result.relevance_score
-
-            # Get the original match and add rerank score
-            match = matches[original_index]
-            if isinstance(match, dict):
-                match["rerank_score"] = rerank_score
-            else:
-                # For object-style matches, create dict
-                match = {
-                    "metadata": match.metadata,
-                    "score": match.score,
-                    "rerank_score": rerank_score,
-                }
-            reranked_matches.append(match)
-
-        return reranked_matches
-
-    except Exception as e:
-        logger.warning(
-            f"Reranking failed: {e}. Falling back to original results.",
-            extra={"error": str(e), "num_matches": len(matches)},
-        )
-        # Fallback: return original top_n results
-        return matches[:top_n]
 
 
 # ========= LLM call (Claude on Bedrock) =========
@@ -389,6 +300,19 @@ def claude_chat(messages):
 app = FastAPI(title="Gov Doc RAG API", version="0.1.0")
 
 
+@app.on_event("startup")
+async def startup_event():
+    logger.info(
+        "API server starting",
+        extra={
+            "region": AWS_REGION,
+            "backend": BACKEND,
+            "embedding_model": EMBEDDING_MODEL,
+            "llm_model": LLM_MODEL,
+        },
+    )
+
+
 class AskIn(BaseModel):
     query: str
     k: int = 6
@@ -407,9 +331,8 @@ def health_head():
 
 @app.post("/ask")
 def ask(inp: AskIn):
-    start_time = time.time()
     logger.info(
-        "Received /ask request",
+        "Processing query",
         extra={"query_length": len(inp.query), "k": inp.k, "lang_hint": inp.lang_hint},
     )
 
@@ -418,21 +341,16 @@ def ask(inp: AskIn):
             400, f"BACKEND={BACKEND} not supported here; set to pinecone"
         )
 
-    # 1) retrieve - get more results if reranking is enabled
-    retrieval_k = RETRIEVAL_K if ENABLE_RERANK else inp.k
-    matches = pinecone_query(inp.query, k=retrieval_k, lang_hint=inp.lang_hint)
+    # 1) retrieve
+    matches = pinecone_query(inp.query, k=inp.k, lang_hint=inp.lang_hint)
+    logger.info("Retrieved matches", extra={"match_count": len(matches)})
 
-    # 2) rerank if enabled
-    if ENABLE_RERANK and len(matches) > 0:
-        matches = rerank_results(inp.query, matches, top_n=RERANK_TOP_N)
-
-    # 3) build contexts
     contexts: List[Dict[str, Any]] = []
     for m in matches:
         meta = m["metadata"] if isinstance(m, dict) else m.metadata
         contexts.append({"metadata": meta})
 
-    # 4) prompt
+    # 2) prompt
     sys_prompt = SYSTEM_PROMPT
     user_prompt = build_user_prompt(inp.query, contexts)
     messages = [
@@ -440,23 +358,24 @@ def ask(inp: AskIn):
         {"role": "user", "content": [{"type": "text", "text": user_prompt}]},
     ]
 
-    # 5) LLM
+    # 3) LLM
+    logger.info("Calling LLM", extra={"model": LLM_MODEL})
     answer = claude_chat(messages)
 
-    # 6) If user is FR and model answered EN, translate back (heuristic)
+    # 4) If user is FR and model answered EN, translate back (heuristic)
     q_lang = inp.lang_hint or detect_lang(inp.query)
     if q_lang == "fr":
         try:
             a_lang = detect_lang(answer)
-        except Exception as e:
-            logger.warning(f"Failed to detect answer language, defaulting to 'en': {e}")
+        except Exception:
             a_lang = "en"
         if a_lang != "fr":
+            logger.info("Translating answer to French")
             answer = translate().translate_text(
                 Text=answer, SourceLanguageCode="en", TargetLanguageCode="fr"
             )["TranslatedText"]
 
-    # 7) citations
+    # 5) citations
     cites = []
     for m in matches:
         meta = m["metadata"] if isinstance(m, dict) else m.metadata
@@ -465,19 +384,13 @@ def ask(inp: AskIn):
                 "doc_id": meta.get("doc_id"),
                 "page": meta.get("page"),
                 "snippet": meta.get("text"),
-                "bbox": None,
-                "rerank_score": m.get("rerank_score") if isinstance(m, dict) else None,
+                "bbox": None,  # page bbox would require deeper line mapping; included for schema stability
             }
         )
 
-    duration = time.time() - start_time
     logger.info(
-        "Completed /ask request",
-        extra={
-            "duration_seconds": duration,
-            "num_citations": len(cites),
-            "answer_length": len(answer),
-        },
+        "Query processed successfully",
+        extra={"citation_count": len(cites), "answer_length": len(answer)},
     )
 
     return JSONResponse({"answer": answer, "citations": cites})
@@ -501,9 +414,8 @@ async def upload(
     dept: Optional[str] = Form(None),
     date: Optional[str] = Form(None),
 ):
-    start_time = time.time()
     logger.info(
-        "Received /upload request",
+        "Processing upload",
         extra={"filename": file.filename, "title": title, "dept": dept},
     )
 
@@ -527,6 +439,8 @@ async def upload(
     import uuid
 
     doc_id = str(uuid.uuid4())
+    logger.info("Starting document ingestion", extra={"doc_id": doc_id})
+
     # raw upload encryption toggle as in Phase 2
     if INGEST_SSE == "AES256":
         os.environ["INGEST_SSE"] = "AES256"
@@ -538,26 +452,23 @@ async def upload(
     # sanity: head object
     s3().head_object(Bucket=RAW_BUCKET, Key=key)
     job_id = start_textract(key)
+    logger.info("Textract job started", extra={"job_id": job_id, "doc_id": doc_id})
+
     pages = poll_textract(job_id)
     meta = {"title": title or file.filename, "dept": dept or "", "date": date or ""}
     normalized = normalize(pages, doc_id, key, meta)
     write_outputs(doc_id, normalized)
 
+    logger.info(
+        "Document ingestion complete",
+        extra={"doc_id": doc_id, "page_count": len(pages)},
+    )
+
     # cleanup
     try:
         os.remove(tmp_path)
-    except Exception as e:
-        logger.warning(
-            f"Failed to cleanup temp file {tmp_path}: {e}",
-            extra={"temp_path": tmp_path},
-        )
+    except Exception:
         pass
-
-    duration = time.time() - start_time
-    logger.info(
-        "Completed /upload request",
-        extra={"doc_id": doc_id, "duration_seconds": duration},
-    )
 
     return {
         "doc_id": doc_id,

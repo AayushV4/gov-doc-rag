@@ -59,7 +59,7 @@ data:
 
     [OUTPUT]
         Name                cloudwatch_logs
-        Match               kube.var.log.containers.api-*_default_*
+        Match               kube.var.log.containers.api-*_gov-doc-rag_*
         region              us-east-1
         log_group_name      /aws/eks/gov-doc-rag-cluster/application/api
         log_stream_prefix   from-fluent-bit-
@@ -68,7 +68,7 @@ data:
 
     [OUTPUT]
         Name                cloudwatch_logs
-        Match               kube.var.log.containers.ingestor-*_default_*
+        Match               kube.var.log.containers.ingestor-*_gov-doc-rag_*
         region              us-east-1
         log_group_name      /aws/eks/gov-doc-rag-cluster/application/ingestor
         log_stream_prefix   from-fluent-bit-
@@ -77,7 +77,7 @@ data:
 
     [OUTPUT]
         Name                cloudwatch_logs
-        Match               kube.var.log.containers.indexer-*_default_*
+        Match               kube.var.log.containers.indexer-*_gov-doc-rag_*
         region              us-east-1
         log_group_name      /aws/eks/gov-doc-rag-cluster/application/indexer
         log_stream_prefix   from-fluent-bit-
@@ -86,7 +86,7 @@ data:
 
     [OUTPUT]
         Name                cloudwatch_logs
-        Match               kube.var.log.containers.web-*_default_*
+        Match               kube.var.log.containers.web-*_gov-doc-rag_*
         region              us-east-1
         log_group_name      /aws/eks/gov-doc-rag-cluster/application/web
         log_stream_prefix   from-fluent-bit-
