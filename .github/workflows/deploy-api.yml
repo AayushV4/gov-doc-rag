@@ -10,7 +10,7 @@ on:
 permissions:
   id-token: write
   contents: read
-  security-events: write  # Add this for Trivy
+  security-events: write
 
 env:
   AWS_REGION: us-east-1
