@@ -1,0 +1,81 @@
+name: Deploy Web
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'services/web/**'
+      - 'k8s/web/**'
+      - '.github/workflows/deploy-web.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ACCOUNT_ID: "023268101038"
+  ECR_REPOSITORY: gov-doc-rag-web
+  EKS_CLUSTER: gov-doc-rag-cluster
+  K8S_NAMESPACE: gov-doc-rag
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::023268101038:role/gov-doc-rag-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Compute image tag
+        id: tag
+        run: echo "tag=${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:$(date -u +%Y%m%d%H%M%S)" >> $GITHUB_OUTPUT
+
+      - name: Build & push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./services/web
+          file: ./services/web/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.tag.outputs.tag }}
+
+      - name: Update kubeconfig
+        run: |
+          KCFG="$RUNNER_TEMP/kubeconfig"
+          aws eks update-kubeconfig --region "${{ env.AWS_REGION }}" --name "${{ env.EKS_CLUSTER }}" --kubeconfig "$KCFG"
+          echo "KUBECONFIG=$KCFG" >> "$GITHUB_ENV"
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Deploy with Helm
+        run: |
+          TAG=$(echo "${{ steps.tag.outputs.tag }}" | cut -d: -f2)
+          helm upgrade web ./k8s/web \
+            --set image.tag=$TAG \
+            --namespace ${{ env.K8S_NAMESPACE }} \
+            --wait \
+            --timeout 5m
+
+      - name: Smoke test
+        run: |
+          for i in {1..12}; do
+            code=$(curl -fsS -o /dev/null -w "%{http_code}" https://web.fedocx.online/ || true)
+            if [ "$code" = "200" ] || [ "$code" = "301" ]; then exit 0; fi
+            sleep 10
+          done
+          exit 1
+
+      - name: Roll back on failure
+        if: failure()
+        run: |
+          helm rollback web --namespace ${{ env.K8S_NAMESPACE }} --wait

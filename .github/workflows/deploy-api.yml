@@ -6,9 +6,12 @@ on:
       - 'services/api/**'
       - '.github/workflows/deploy-api.yml'
   workflow_dispatch:
+
 permissions:
   id-token: write
   contents: read
+  security-events: write  # Add this for Trivy
+
 env:
   AWS_REGION: us-east-1
   ACCOUNT_ID: "023268101038"
@@ -17,6 +20,8 @@ env:
   K8S_NAMESPACE: gov-doc-rag
   DEPLOYMENT_NAME: api
   CONTAINER_NAME: api
+  TOPIC_ARN: arn:aws:sns:us-east-1:023268101038:gov-doc-rag-alerts  # Add this
+
 jobs:
   build-push-deploy:
     runs-on: ubuntu-latest
@@ -54,6 +59,21 @@ jobs:
           platforms: linux/amd64
           tags: ${{ steps.tag.outputs.tag }}
 
+      # ADD THIS: Security scanning
+      - name: Run Trivy security scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.tag.outputs.tag }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
       - name: Update kubeconfig
         run: |
           KCFG="$RUNNER_TEMP/kubeconfig"
@@ -62,7 +82,6 @@ jobs:
 
       - name: Apply base manifests
         run: kubectl apply --server-side -f k8s/base
-
 
       - name: Can we get a token?
         run: aws eks get-token --region "${{ env.AWS_REGION }}" --cluster-name "${{ env.EKS_CLUSTER }}" >/dev/null
@@ -84,16 +103,32 @@ jobs:
         run: |
           for i in {1..12}; do
             code=$(curl -fsS -o /dev/null -w "%{http_code}" https://api.fedocx.online/health || true)
-            if [ "$code" = "200" ]; then exit 0; fi
+            if [ "$code" = "200" ]; then
+              echo "✓ API is responding (HTTP $code)"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $code - retrying..."
             sleep 10
           done
+          echo "✗ API health check failed"
           exit 1
+
+      # ADD THIS: Success notification
+      - name: Notify success
+        if: success()
+        run: |
+          MSG="API deployed successfully: ${{ steps.tag.outputs.tag }}"
+          aws sns publish --topic-arn "$TOPIC_ARN" --message "$MSG" --subject "✓ API Deploy Success"
 
       - name: Roll back on failure
         if: failure()
         run: |
+          echo "Deployment failed - rolling back to previous version"
           kubectl -n "${{ env.K8S_NAMESPACE }}" rollout undo deploy/"${{ env.DEPLOYMENT_NAME }}"
           kubectl -n "${{ env.K8S_NAMESPACE }}" rollout status deploy/"${{ env.DEPLOYMENT_NAME }}" --timeout=5m
+
+          MSG="API deploy failed and rolled back: repo=${{ github.repository }}, run_id=${{ github.run_id }}, commit=${{ github.sha }}"
+          aws sns publish --topic-arn "$TOPIC_ARN" --message "$MSG" --subject "✗ API Deploy Failed"
 
       - name: Rollout status (with fallback)
         if: always()

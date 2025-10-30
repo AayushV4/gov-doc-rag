@@ -1,24 +1,80 @@
-name: Uptime
+name: Uptime Monitoring
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 * * * *"  # Every 5 minutes
   workflow_dispatch:
 
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  TOPIC_ARN: arn:aws:sns:us-east-1:023268101038:gov-doc-rag-alerts
+
 jobs:
-  ping:
+  health-check:
     runs-on: ubuntu-latest
     steps:
-      - name: Curl /health
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::023268101038:role/gov-doc-rag-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check API Health
+        id: api-check
         run: |
           set -euo pipefail
           URL="https://api.fedocx.online/health"
           for i in {1..3}; do
             CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
             if [ "$CODE" = "200" ]; then
+              echo "✓ API health check passed (HTTP $CODE)"
+              echo "status=success" >> $GITHUB_OUTPUT
               exit 0
             fi
+            echo "Attempt $i: HTTP $CODE - retrying..."
             sleep 10
           done
-          echo "Health check failed"
+          echo "✗ API health check failed"
+          echo "status=failed" >> $GITHUB_OUTPUT
           exit 1
+
+      - name: Alert on API failure
+        if: failure() && steps.api-check.outputs.status == 'failed'
+        run: |
+          MSG="API health check failed: https://api.fedocx.online/health is not responding (run_id=${{ github.run_id }})"
+          aws sns publish \
+            --topic-arn "$TOPIC_ARN" \
+            --message "$MSG" \
+            --subject "⚠️ API Health Check Failed"
+
+      - name: Check Web Health
+        id: web-check
+        run: |
+          set -euo pipefail
+          URL="https://web.fedocx.online/"
+          for i in {1..3}; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
+            if [ "$CODE" = "200" ] || [ "$CODE" = "301" ]; then
+              echo "✓ Web health check passed (HTTP $CODE)"
+              echo "status=success" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $CODE - retrying..."
+            sleep 10
+          done
+          echo "✗ Web health check failed"
+          echo "status=failed" >> $GITHUB_OUTPUT
+          exit 1
+
+      - name: Alert on Web failure
+        if: failure() && steps.web-check.outputs.status == 'failed'
+        run: |
+          MSG="Web health check failed: https://web.fedocx.online/ is not responding (run_id=${{ github.run_id }})"
+          aws sns publish \
+            --topic-arn "$TOPIC_ARN" \
+            --message "$MSG" \
+            --subject "⚠️ Web Health Check Failed"
