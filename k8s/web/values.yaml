@@ -25,5 +25,5 @@ ingress:
     alb.ingress.kubernetes.io/success-codes: "200"
     alb.ingress.kubernetes.io/group.name: gov-doc-rag
     alb.ingress.kubernetes.io/group.order: "2"
-    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:023268101038:certificate/06a146c0-c0b3-4bac-a8ca-78d031695bb8
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:023268101038:certificate/5cba03e2-b1f6-420b-9ba3-3353f89469c1
     alb.ingress.kubernetes.io/ssl-redirect: "443"
